@@ -7,6 +7,7 @@ var _progress_dialog: AcceptDialog = null
 var _progress_bar: ProgressBar = null
 var _progress_label: Label = null
 var _processing_files: bool = false
+var _cancel_processing: bool = false
 
 func _enter_tree() -> void:
 	# Limpa recursos anteriores para evitar duplicações
@@ -38,10 +39,14 @@ func _exit_tree() -> void:
 		_toolbar_button = null
 	
 	if _file_dialog:
+		if _file_dialog.get_parent():
+			_file_dialog.get_parent().remove_child(_file_dialog)
 		_file_dialog.queue_free()
 		_file_dialog = null
 		
 	if _progress_dialog:
+		if _progress_dialog.get_parent():
+			_progress_dialog.get_parent().remove_child(_progress_dialog)
 		_progress_dialog.queue_free()
 		_progress_dialog = null
 		_progress_bar = null
@@ -50,7 +55,9 @@ func _exit_tree() -> void:
 func _create_progress_dialog() -> void:
 	_progress_dialog = AcceptDialog.new()
 	_progress_dialog.title = "Processando GLB"
-	_progress_dialog.size = Vector2(400, 150)
+	_progress_dialog.size = Vector2(400, 180)
+	_progress_dialog.get_ok_button().text = "Fechar"
+	_progress_dialog.close_requested.connect(_on_progress_dialog_close_requested)
 	
 	var vbox = VBoxContainer.new()
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -66,19 +73,42 @@ func _create_progress_dialog() -> void:
 	_progress_bar.value = 0
 	
 	vbox.add_child(_progress_bar)
+	
+	# Adicionar botão de cancelar
+	var cancel_button = Button.new()
+	cancel_button.text = "Cancelar Processamento"
+	cancel_button.pressed.connect(_on_cancel_pressed)
+	vbox.add_child(cancel_button)
+	
 	_progress_dialog.add_child(vbox)
 	
 	get_editor_interface().get_base_control().add_child(_progress_dialog)
 
+func _on_cancel_pressed() -> void:
+	_cancel_processing = true
+	_progress_label.text = "Cancelando processamento..."
+
+func _on_progress_dialog_close_requested() -> void:
+	if _processing_files:
+		_cancel_processing = true
+		_progress_label.text = "Cancelando processamento..."
+	else:
+		_progress_dialog.hide()
+
 func _on_button_pressed() -> void:
 	if _file_dialog and not _processing_files:
 		_file_dialog.popup_centered_ratio(0.7)
+
+func _safely_close_file(file: FileAccess) -> void:
+	if file != null:
+		file.close()
 
 func _on_dir_selected(dir_path: String) -> void:
 	if _processing_files:
 		return
 		
 	_processing_files = true
+	_cancel_processing = false
 	
 	var dir = DirAccess.open(dir_path)
 	if not dir:
@@ -110,31 +140,48 @@ func _on_dir_selected(dir_path: String) -> void:
 	_progress_bar.max_value = glb_files.size()
 	_progress_bar.value = 0
 	
-	# Processa os arquivos um por um
-	await _process_glb_files(glb_files)
-	
-	# Oculta o diálogo de progresso
-	_progress_dialog.hide()
-	
-	_processing_files = false
+	# Processa os arquivos um por um com um CallDeferred para evitar sobrecarga da thread principal
+	call_deferred("_start_processing_glb_files", glb_files)
+
+func _start_processing_glb_files(glb_files: Array) -> void:
+	# Usar um timer para iniciar o processamento no próximo quadro
+	var timer = Timer.new()
+	timer.one_shot = true
+	timer.wait_time = 0.1
+	add_child(timer)
+	timer.timeout.connect(func(): 
+		remove_child(timer)
+		timer.queue_free()
+		_process_glb_files(glb_files)
+	)
+	timer.start()
 
 func _process_glb_files(glb_files: Array) -> void:
 	var success_count = 0
 	var error_count = 0
 	var processed_count = 0
+	var canceled_count = 0
 	
-	# Define o tamanho do lote para processar arquivos
-	var batch_size = 3  # Processar apenas 3 arquivos por vez
+	# Definir um tamanho de lote menor
+	var batch_size = 1  # Processar apenas 1 arquivo por vez para reduzir a carga
 	
 	# Calcular número total de lotes
 	var total_batches = ceil(float(glb_files.size()) / batch_size)
 	
 	for batch in range(total_batches):
+		if _cancel_processing:
+			canceled_count = glb_files.size() - processed_count
+			break
+			
 		var start_idx = batch * batch_size
 		var end_idx = min(start_idx + batch_size, glb_files.size())
 		
 		# Processar este lote de arquivos
 		for i in range(start_idx, end_idx):
+			if _cancel_processing:
+				canceled_count = glb_files.size() - processed_count
+				break
+				
 			var file_path = glb_files[i]
 			processed_count += 1
 			
@@ -143,8 +190,10 @@ func _process_glb_files(glb_files: Array) -> void:
 			
 			# Atualiza a barra de progresso
 			_progress_bar.value = processed_count
-			# Força atualização da interface
-			await get_tree().process_frame
+			
+			# Força atualização da interface e permitir que eventos sejam processados
+			for _i in range(5):  # Múltiplos frames para garantir
+				await get_tree().process_frame
 			
 			# Tenta ativar física para o arquivo GLB
 			var result = await _enable_physics_for_glb(file_path)
@@ -154,12 +203,15 @@ func _process_glb_files(glb_files: Array) -> void:
 				error_count += 1
 		
 		# Aguardar entre lotes para permitir que o editor respire
-		_progress_label.text = "Aguardando para processar próximo lote... (" + str(processed_count) + "/" + str(glb_files.size()) + ")"
-		await get_tree().create_timer(1.0).timeout
+		if not _cancel_processing:
+			_progress_label.text = "Aguardando para processar próximo lote... (" + str(processed_count) + "/" + str(glb_files.size()) + ")"
+			for _i in range(10):  # Dar mais tempo para o editor respirar
+				await get_tree().process_frame
+			await get_tree().create_timer(0.5).timeout
 	
 	# Aguardar um tempo adicional para garantir que todas as operações do sistema de arquivos sejam concluídas
 	_progress_label.text = "Finalizando e estabilizando o sistema de arquivos..."
-	await get_tree().create_timer(2.0).timeout
+	await get_tree().create_timer(1.0).timeout
 	
 	# Executa limpeza segura
 	await _cleanup_after_processing()
@@ -168,10 +220,21 @@ func _process_glb_files(glb_files: Array) -> void:
 	var message = "Processamento concluído!\n"
 	message += "Arquivos GLB encontrados: " + str(glb_files.size()) + "\n"
 	message += "Arquivos processados com sucesso: " + str(success_count) + "\n"
-	message += "Arquivos com erro: " + str(error_count) + "\n\n"
+	message += "Arquivos com erro: " + str(error_count) + "\n"
+	
+	if canceled_count > 0:
+		message += "Processamento cancelado: " + str(canceled_count) + " arquivos não processados\n\n"
+	else:
+		message += "\n"
+	
 	message += "Os arquivos foram modificados. Recomendamos reiniciar o editor para garantir que as alterações sejam aplicadas corretamente."
 	
 	_show_notification_dialog(message)
+	
+	# Esconder o diálogo de progresso e resetar estado
+	_progress_dialog.hide()
+	_processing_files = false
+	_cancel_processing = false
 
 func _enable_physics_for_glb(file_path: String) -> bool:
 	# Verifica se o arquivo existe
@@ -196,16 +259,17 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 	var import_file = FileAccess.open(import_file_path, FileAccess.READ)
 	if import_file == null:
 		push_error("Não foi possível abrir o arquivo: " + import_file_path)
-		backup_file.close()
-		DirAccess.remove_absolute(backup_path)
+		_safely_close_file(backup_file)
+		if FileAccess.file_exists(backup_path):
+			DirAccess.remove_absolute(backup_path)
 		return false
 	
 	var import_config_text = import_file.get_as_text()
-	import_file.close()
+	_safely_close_file(import_file)
 	
 	# Salvar backup
 	backup_file.store_string(import_config_text)
-	backup_file.close()
+	_safely_close_file(backup_file)
 	
 	# Extrai o nome do arquivo sem a extensão para usar como referência do nó
 	var file_name = file_path.get_file().get_basename()
@@ -213,7 +277,8 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 	# Verifica se já existe física ativada
 	if import_config_text.find("\"generate/physics\": true") != -1:
 		print("Física já ativada para: " + file_path)
-		DirAccess.remove_absolute(backup_path)  # Remove backup se não for necessário
+		if FileAccess.file_exists(backup_path):
+			DirAccess.remove_absolute(backup_path)  # Remove backup se não for necessário
 		return true
 	
 	# Modificações específicas para ativar a física no formato correto
@@ -310,48 +375,56 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 		modified = true
 	
 	if modified:
+		# Permitir frames de respiração antes da escrita
+		for _i in range(3):
+			await get_tree().process_frame
+		
 		# Escreve as alterações de volta no arquivo .import usando sistema de tentativas
 		var max_attempts = 3
 		var attempt = 0
 		var success = false
 		
 		while attempt < max_attempts and not success:
+			# Esperar um pouco antes de tentar
+			if attempt > 0:
+				await get_tree().create_timer(0.5).timeout
+			
 			var output_file = FileAccess.open(import_file_path, FileAccess.WRITE)
 			if not output_file:
 				push_error("Tentativa " + str(attempt + 1) + ": Não foi possível escrever no arquivo: " + import_file_path)
 				attempt += 1
-				await get_tree().create_timer(0.5).timeout
 				continue
 			
 			output_file.store_string(import_config_text)
-			output_file.close()
-			success = true
+			_safely_close_file(output_file)
+			
+			# Verificar se a escrita funcionou
+			if FileAccess.file_exists(import_file_path):
+				success = true
+			else:
+				attempt += 1
 		
 		if not success:
 			# Restaurar backup se todas as tentativas falharem
 			var backup_restore = FileAccess.open(backup_path, FileAccess.READ)
 			if backup_restore:
 				var original_content = backup_restore.get_as_text()
-				backup_restore.close()
+				_safely_close_file(backup_restore)
 				
 				var restore_file = FileAccess.open(import_file_path, FileAccess.WRITE)
 				if restore_file:
 					restore_file.store_string(original_content)
-					restore_file.close()
+					_safely_close_file(restore_file)
 			
 			push_error("Não foi possível modificar o arquivo após várias tentativas: " + import_file_path)
 			return false
 		
 		# Aguarda um pouco antes de notificar o filesystem
-		await get_tree().create_timer(0.2).timeout
+		await get_tree().create_timer(0.3).timeout
 		
-		# Notificar o sistema de arquivos de forma mais suave
-		var editor_filesystem = get_editor_interface().get_resource_filesystem()
-		# Scan em vez de reimport imediato
-		editor_filesystem.scan()
-		
-		# Aguardar mais tempo para o scan ser processado
-		await get_tree().create_timer(0.5).timeout
+		# Frames de respiração antes de continuar
+		for _i in range(5):
+			await get_tree().process_frame
 		
 		# Remover o backup se tudo correu bem
 		if FileAccess.file_exists(backup_path):
@@ -367,19 +440,20 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 
 # Função de limpeza segura após o processamento
 func _cleanup_after_processing() -> void:
-	# Garantir que todos os diálogos sejam fechados
+	# Garantir que todos os diálogos sejam fechados corretamente
 	if _progress_dialog and _progress_dialog.visible:
 		_progress_dialog.hide()
 	
-	# Resetar estados
-	_processing_files = false
-	
 	# Dar tempo para o editor respirar
-	await get_tree().create_timer(0.5).timeout
+	for _i in range(10):
+		await get_tree().process_frame
 	
 	# Notificar o filesystem uma última vez de forma suave
 	var editor_filesystem = get_editor_interface().get_resource_filesystem()
 	editor_filesystem.scan()
+	
+	# Mais tempo para processamento
+	await get_tree().create_timer(0.5).timeout
 	
 	print("Limpeza após processamento concluída.")
 
@@ -406,7 +480,7 @@ func _show_notification_dialog(message: String) -> void:
 	var dialog = AcceptDialog.new()
 	dialog.dialog_text = message
 	dialog.title = "GLB Physics Activator"
-	dialog.size = Vector2(400, 200)
+	dialog.size = Vector2(400, 250)
 	dialog.confirmed.connect(func(): dialog.queue_free())
 	get_editor_interface().get_base_control().add_child(dialog)
 	dialog.popup_centered()
