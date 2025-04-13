@@ -121,26 +121,48 @@ func _on_dir_selected(dir_path: String) -> void:
 func _process_glb_files(glb_files: Array) -> void:
 	var success_count = 0
 	var error_count = 0
+	var processed_count = 0
 	
-	for i in range(glb_files.size()):
-		var file_path = glb_files[i]
-		_progress_label.text = "Processando: " + file_path.get_file()
-		print("Processando: " + file_path)
+	# Define o tamanho do lote para processar arquivos
+	var batch_size = 3  # Processar apenas 3 arquivos por vez
+	
+	# Calcular número total de lotes
+	var total_batches = ceil(float(glb_files.size()) / batch_size)
+	
+	for batch in range(total_batches):
+		var start_idx = batch * batch_size
+		var end_idx = min(start_idx + batch_size, glb_files.size())
 		
-		# Atualiza a barra de progresso
-		_progress_bar.value = i
-		# Força atualização da interface
-		await get_tree().process_frame
-		
-		# Tenta ativar física para o arquivo GLB
-		var result = await _enable_physics_for_glb(file_path)
-		if result:
-			success_count += 1
-		else:
-			error_count += 1
+		# Processar este lote de arquivos
+		for i in range(start_idx, end_idx):
+			var file_path = glb_files[i]
+			processed_count += 1
 			
-		# Pequena pausa para evitar sobrecarregar o sistema
-		await get_tree().create_timer(0.1).timeout
+			_progress_label.text = "Processando: " + file_path.get_file() + " (" + str(processed_count) + "/" + str(glb_files.size()) + ")"
+			print("Processando: " + file_path)
+			
+			# Atualiza a barra de progresso
+			_progress_bar.value = processed_count
+			# Força atualização da interface
+			await get_tree().process_frame
+			
+			# Tenta ativar física para o arquivo GLB
+			var result = await _enable_physics_for_glb(file_path)
+			if result:
+				success_count += 1
+			else:
+				error_count += 1
+		
+		# Aguardar entre lotes para permitir que o editor respire
+		_progress_label.text = "Aguardando para processar próximo lote... (" + str(processed_count) + "/" + str(glb_files.size()) + ")"
+		await get_tree().create_timer(1.0).timeout
+	
+	# Aguardar um tempo adicional para garantir que todas as operações do sistema de arquivos sejam concluídas
+	_progress_label.text = "Finalizando e estabilizando o sistema de arquivos..."
+	await get_tree().create_timer(2.0).timeout
+	
+	# Executa limpeza segura
+	await _cleanup_after_processing()
 	
 	# Mostra o resultado
 	var message = "Processamento concluído!\n"
@@ -163,14 +185,27 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 		push_error("Arquivo .import não encontrado: " + import_file_path)
 		return false
 	
+	# Criar backup do arquivo antes de modificá-lo
+	var backup_path = import_file_path + ".bak"
+	var backup_file = FileAccess.open(backup_path, FileAccess.WRITE)
+	if backup_file == null:
+		push_error("Não foi possível criar backup para: " + import_file_path)
+		return false
+	
 	# Lê o conteúdo do arquivo .import
 	var import_file = FileAccess.open(import_file_path, FileAccess.READ)
 	if import_file == null:
 		push_error("Não foi possível abrir o arquivo: " + import_file_path)
+		backup_file.close()
+		DirAccess.remove_absolute(backup_path)
 		return false
 	
 	var import_config_text = import_file.get_as_text()
 	import_file.close()
+	
+	# Salvar backup
+	backup_file.store_string(import_config_text)
+	backup_file.close()
 	
 	# Extrai o nome do arquivo sem a extensão para usar como referência do nó
 	var file_name = file_path.get_file().get_basename()
@@ -178,6 +213,7 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 	# Verifica se já existe física ativada
 	if import_config_text.find("\"generate/physics\": true") != -1:
 		print("Física já ativada para: " + file_path)
+		DirAccess.remove_absolute(backup_path)  # Remove backup se não for necessário
 		return true
 	
 	# Modificações específicas para ativar a física no formato correto
@@ -274,31 +310,78 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 		modified = true
 	
 	if modified:
-		# Escreve as alterações de volta no arquivo .import
-		var output_file = FileAccess.open(import_file_path, FileAccess.WRITE)
-		if not output_file:
-			push_error("Não foi possível escrever no arquivo: " + import_file_path)
+		# Escreve as alterações de volta no arquivo .import usando sistema de tentativas
+		var max_attempts = 3
+		var attempt = 0
+		var success = false
+		
+		while attempt < max_attempts and not success:
+			var output_file = FileAccess.open(import_file_path, FileAccess.WRITE)
+			if not output_file:
+				push_error("Tentativa " + str(attempt + 1) + ": Não foi possível escrever no arquivo: " + import_file_path)
+				attempt += 1
+				await get_tree().create_timer(0.5).timeout
+				continue
+			
+			output_file.store_string(import_config_text)
+			output_file.close()
+			success = true
+		
+		if not success:
+			# Restaurar backup se todas as tentativas falharem
+			var backup_restore = FileAccess.open(backup_path, FileAccess.READ)
+			if backup_restore:
+				var original_content = backup_restore.get_as_text()
+				backup_restore.close()
+				
+				var restore_file = FileAccess.open(import_file_path, FileAccess.WRITE)
+				if restore_file:
+					restore_file.store_string(original_content)
+					restore_file.close()
+			
+			push_error("Não foi possível modificar o arquivo após várias tentativas: " + import_file_path)
 			return false
 		
-		output_file.store_string(import_config_text)
-		output_file.close()
+		# Aguarda um pouco antes de notificar o filesystem
+		await get_tree().create_timer(0.2).timeout
 		
-		# Marca o arquivo para reimportação
+		# Notificar o sistema de arquivos de forma mais suave
 		var editor_filesystem = get_editor_interface().get_resource_filesystem()
+		# Scan em vez de reimport imediato
 		editor_filesystem.scan()
-		await get_tree().process_frame
 		
-		# Força a reimportação específica deste arquivo
-		editor_filesystem.reimport_files([file_path])
+		# Aguardar mais tempo para o scan ser processado
+		await get_tree().create_timer(0.5).timeout
 		
-		# Aguarda para garantir que a reimportação foi concluída
-		for i in range(10):
-			await get_tree().process_frame
+		# Remover o backup se tudo correu bem
+		if FileAccess.file_exists(backup_path):
+			DirAccess.remove_absolute(backup_path)
 		
 		print("Física ativada para: " + file_path)
 		return true
 	
+	# Remover o backup se não houve alterações
+	if FileAccess.file_exists(backup_path):
+		DirAccess.remove_absolute(backup_path)
 	return false
+
+# Função de limpeza segura após o processamento
+func _cleanup_after_processing() -> void:
+	# Garantir que todos os diálogos sejam fechados
+	if _progress_dialog and _progress_dialog.visible:
+		_progress_dialog.hide()
+	
+	# Resetar estados
+	_processing_files = false
+	
+	# Dar tempo para o editor respirar
+	await get_tree().create_timer(0.5).timeout
+	
+	# Notificar o filesystem uma última vez de forma suave
+	var editor_filesystem = get_editor_interface().get_resource_filesystem()
+	editor_filesystem.scan()
+	
+	print("Limpeza após processamento concluída.")
 
 # Função auxiliar para encontrar a chave correspondente em uma string JSON
 func _find_matching_brace(text: String, open_pos: int) -> int:
