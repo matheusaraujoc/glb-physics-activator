@@ -36,6 +36,8 @@ Um plugin para o [Godot Engine](https://godotengine.org/) que ativa a geração 
    - A interface exibirá uma barra de progresso e mensagens que informam o andamento e o status de cada arquivo processado.
 4. **Finalização**:  
    Ao concluir o processamento, uma notificação mostrará a quantidade de arquivos processados com sucesso e os que apresentaram erro. Recomenda-se reiniciar o editor para que todas as alterações sejam corretamente aplicadas.
+   > **Importante**: Após a edição dos arquivos `.import`, é necessário fazer a reimportação dos arquivos GLB ou reiniciar o editor/projeto para que as alterações sejam efetivamente aplicadas.
+
 
 ## Estrutura do Código
 
