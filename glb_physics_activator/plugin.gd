@@ -8,8 +8,6 @@ var _progress_bar: ProgressBar = null
 var _progress_label: Label = null
 var _processing_files: bool = false
 var _cancel_processing: bool = false
-var _files_to_reimport: Array = []
-var _is_reimporting: bool = false
 
 func _enter_tree() -> void:
 	# Limpa recursos anteriores para evitar duplicações
@@ -35,10 +33,6 @@ func _enter_tree() -> void:
 	print("Plugin GLB Physics Activator inicializado.")
 
 func _exit_tree() -> void:
-	# Garantir que não estamos processando ao sair
-	_cancel_processing = true
-	_processing_files = false
-	
 	if _toolbar_button:
 		remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, _toolbar_button)
 		_toolbar_button.queue_free()
@@ -115,7 +109,6 @@ func _on_dir_selected(dir_path: String) -> void:
 		
 	_processing_files = true
 	_cancel_processing = false
-	_files_to_reimport.clear()
 	
 	var dir = DirAccess.open(dir_path)
 	if not dir:
@@ -199,35 +192,22 @@ func _process_glb_files(glb_files: Array) -> void:
 			_progress_bar.value = processed_count
 			
 			# Força atualização da interface e permitir que eventos sejam processados
-			for _i in range(5):  # Múltiplos frames para garantir
+			for _i in range(3):  # Reduzido para não causar tanto atraso
 				await get_tree().process_frame
 			
 			# Tenta ativar física para o arquivo GLB
 			var result = await _enable_physics_for_glb(file_path)
 			if result:
 				success_count += 1
-				_files_to_reimport.append(file_path)
 			else:
 				error_count += 1
 		
 		# Aguardar entre lotes para permitir que o editor respire
 		if not _cancel_processing:
 			_progress_label.text = "Aguardando para processar próximo lote... (" + str(processed_count) + "/" + str(glb_files.size()) + ")"
-			for _i in range(10):  # Dar mais tempo para o editor respirar
+			for _i in range(5):  # Reduzido para não causar tanto atraso
 				await get_tree().process_frame
-			await get_tree().create_timer(0.5).timeout
-	
-	# Aguardar um tempo adicional para garantir que todas as operações do sistema de arquivos sejam concluídas
-	_progress_label.text = "Finalizando e estabilizando o sistema de arquivos..."
-	await get_tree().create_timer(1.0).timeout
-	
-	# Verifica se temos arquivos para reimportar
-	if not _files_to_reimport.is_empty() and not _cancel_processing:
-		_progress_label.text = "Notificando o sistema de arquivos (isso pode levar algum tempo)..."
-		await _safe_reimport_files()
-	else:
-		# Executa limpeza segura mesmo se não houver arquivos para reimportar
-		await _cleanup_after_processing()
+			await get_tree().create_timer(0.2).timeout  # Reduzido para não causar tanto atraso
 	
 	# Mostra o resultado
 	var message = "Processamento concluído!\n"
@@ -236,11 +216,9 @@ func _process_glb_files(glb_files: Array) -> void:
 	message += "Arquivos com erro: " + str(error_count) + "\n"
 	
 	if canceled_count > 0:
-		message += "Processamento cancelado: " + str(canceled_count) + " arquivos não processados\n\n"
-	else:
-		message += "\n"
+		message += "Processamento cancelado: " + str(canceled_count) + " arquivos não processados\n"
 	
-	message += "Os arquivos foram modificados. Você pode precisar reiniciar o editor para garantir que todas as alterações sejam aplicadas corretamente."
+	message += "\nAs propriedades de física foram aplicadas nos arquivos .import. \nPara que as alterações sejam aplicadas, será necessário reimportar manualmente os arquivos ou reiniciar o editor."
 	
 	_show_notification_dialog(message)
 	
@@ -248,84 +226,6 @@ func _process_glb_files(glb_files: Array) -> void:
 	_progress_dialog.hide()
 	_processing_files = false
 	_cancel_processing = false
-
-# Método seguro para reimportar arquivos - evita crashes
-func _safe_reimport_files() -> void:
-	if _is_reimporting or _files_to_reimport.is_empty():
-		return
-	
-	_is_reimporting = true
-	
-	# Notificar o sistema de arquivos de forma mais suave
-	var editor_filesystem = get_editor_interface().get_resource_filesystem()
-	
-	# Atualizar o progresso para mostrar que estamos reimportando
-	_progress_bar.max_value = _files_to_reimport.size()
-	_progress_bar.value = 0
-	
-	# Reimportar em pequenos lotes
-	var batch_size = 1  # Reimportar um arquivo por vez
-	var total_files = _files_to_reimport.size()
-	var files_processed = 0
-	
-	for i in range(0, total_files, batch_size):
-		if _cancel_processing:
-			break
-		
-		var end_idx = min(i + batch_size, total_files)
-		var current_batch = _files_to_reimport.slice(i, end_idx)
-		
-		for file_path in current_batch:
-			if _cancel_processing:
-				break
-				
-			_progress_label.text = "Notificando alterações: " + file_path.get_file() + " (" + str(files_processed + 1) + "/" + str(total_files) + ")"
-			_progress_bar.value = files_processed + 1
-			
-			print("Notificando sistema sobre: " + file_path)
-			
-			# Processar apenas a atualização do sistema de arquivos
-			editor_filesystem.update_file(file_path)
-			
-			# Aguardar antes de processar o próximo arquivo
-			for _j in range(5):
-				await get_tree().process_frame
-			
-			files_processed += 1
-		
-		# Pausa entre lotes para deixar o editor respirar
-		_progress_label.text = "Aguardando para processar próximo lote... (" + str(files_processed) + "/" + str(total_files) + ")"
-		await get_tree().create_timer(0.3).timeout
-		for _j in range(10):
-			await get_tree().process_frame
-	
-	# Scan final suave
-	_progress_label.text = "Finalizando reimportação..."
-	await get_tree().create_timer(0.5).timeout
-	
-	# Executar limpeza após reimportação
-	await _cleanup_after_processing()
-	
-	_is_reimporting = false
-
-# Função de limpeza segura após o processamento
-func _cleanup_after_processing() -> void:
-	# Garantir que todos os diálogos sejam fechados corretamente
-	if _progress_dialog and _progress_dialog.visible and not _progress_dialog.is_inside_tree():
-		return
-	
-	# Dar tempo para o editor respirar
-	for _i in range(10):
-		await get_tree().process_frame
-	
-	# Notificar o filesystem uma última vez de forma suave
-	var editor_filesystem = get_editor_interface().get_resource_filesystem()
-	editor_filesystem.scan()
-	
-	# Mais tempo para processamento
-	await get_tree().create_timer(0.5).timeout
-	
-	print("Limpeza após processamento concluída.")
 
 func _enable_physics_for_glb(file_path: String) -> bool:
 	# Verifica se o arquivo existe
@@ -467,7 +367,7 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 	
 	if modified:
 		# Permitir frames de respiração antes da escrita
-		for _i in range(3):
+		for _i in range(2):  # Reduzido para 2 frames
 			await get_tree().process_frame
 		
 		# Escreve as alterações de volta no arquivo .import usando sistema de tentativas
@@ -478,7 +378,7 @@ func _enable_physics_for_glb(file_path: String) -> bool:
 		while attempt < max_attempts and not success:
 			# Esperar um pouco antes de tentar
 			if attempt > 0:
-				await get_tree().create_timer(0.5).timeout
+				await get_tree().create_timer(0.2).timeout  # Reduzido tempo de espera
 			
 			var output_file = FileAccess.open(import_file_path, FileAccess.WRITE)
 			if not output_file:
