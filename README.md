@@ -59,7 +59,8 @@ Um plugin para o [Godot Engine](https://godotengine.org/) que ativa a geração 
 ## Observações
 
 **Atenção:**  
-- Este plugin é fornecido "no estado em que se encontra".  
+- Este plugin é fornecido "no estado em que se encontra".
+- Da forma como está ou com algumas alterações, pode ser possível utilizar ele para fazer o mesmo com outros tipos de arquivos, como FBX. No entanto isso não foi testado e o plugin não foi desenvolvido com essa finalidade.
 - **Não me responsabilizo por qualquer perda de arquivos ou erros ocorridos na engine.**  
 - O uso deste plugin é de responsabilidade do usuário, e deve ser testado em projetos de desenvolvimento ou backup antes de ser aplicado em ambientes de produção.
 
@@ -78,5 +79,7 @@ Contribuições são bem-vindas! Se você deseja sugerir melhorias, correções 
 Este projeto está licenciado sob a [MIT License](LICENSE). Sinta-se à vontade para utilizar e modificar o plugin conforme suas necessidades.
 
 ---
+
+Desenvolvido por Matheus Araújo, estudante de Ciência da Computação da Universidade Estadual do Piauí.
 
 Se houver dúvidas ou sugestões, abra uma issue no repositório!
