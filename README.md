@@ -7,7 +7,6 @@ Um plugin para o [Godot Engine](https://godotengine.org/) que ativa a geração 
 - **Ativação da Física em Lote**: Habilita a geração de física para vários arquivos GLB simultaneamente, modificando os respectivos arquivos `.import`.
 - **Processamento em Lotes**: Processa os arquivos em pequenos grupos para evitar travamentos do editor e garantir uma execução suave.
 - **Feedback Visual**: Exibe um diálogo com uma barra de progresso e mensagens, mantendo o usuário informado sobre o andamento do processamento.
-- **Backup e Segurança**: Cria backups dos arquivos `.import` antes de realizar modificações, restaurando-os em caso de erros.
 - **Integração com o Editor**: Adiciona um botão na barra de ferramentas do editor, facilitando o acesso e o uso do plugin diretamente do ambiente de desenvolvimento.
 
 ## Pré-requisitos
